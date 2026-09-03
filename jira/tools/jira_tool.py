@@ -33,7 +33,7 @@ class JiraTool(ToolBase):
         try:
             base_url, client = await self._get_client(call)
             async with client:
-                url = f"{base_url}/rest/api/3/search"
+                url = f"{base_url}/rest/api/3/search/jql"
                 params = {"jql": jql, "maxResults": limit, "fields": "summary,status"}
                 resp = await client.get(url, params=params)
                 resp.raise_for_status()
