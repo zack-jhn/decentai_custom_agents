@@ -3,7 +3,7 @@ schema_version: "1.0"
 agent:
   id: jira
   name: Jira Agent
-  version: "1.0.0"
+  version: "1.1.0"
   description: >
     Manages Jira issues, including searching for tickets, logging work,
     and transitioning issues between statuses.
