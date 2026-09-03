@@ -213,3 +213,35 @@ tools:
           properties:
             success: {type: boolean}
             message: {type: string}
+
+      - id: execute_jql
+        name: Execute Custom JQL
+        description: Execute any arbitrary JQL query and retrieve specified fields for matching issues.
+        permission_level: 0
+        timeout_seconds: 45
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.execute_jql
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [jql]
+          properties:
+            jql: {type: string}
+            fields:
+              type: array
+              items: {type: string}
+            max_results: {type: integer, minimum: 1, maximum: 100, default: 50}
+        outputs:
+          type: object
+          required: [issues, total]
+          properties:
+            issues:
+              type: array
+              items:
+                type: object
+                properties:
+                  key: {type: string}
+                  fields: {type: object}
+            total: {type: integer}

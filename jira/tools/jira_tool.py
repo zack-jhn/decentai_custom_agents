@@ -221,3 +221,33 @@ class JiraTool(ToolBase):
             return {"success": False, "message": f"API error: {e.response.text}"}, "error"
         except Exception as e:
             return {"success": False, "message": str(e)}, "error"
+
+    async def execute_jql(self, call):
+        jql = str(call.inputs["jql"])
+        fields = call.inputs.get("fields") or ["summary", "status", "assignee"]
+        max_results = int(call.inputs.get("max_results") or 50)
+
+        await call.progress(f"Executing custom JQL: {jql}")
+        
+        try:
+            base_url, client = await self._get_client(call)
+            async with client:
+                url = f"{base_url}/rest/api/3/search/jql"
+                params = {"jql": jql, "maxResults": max_results, "fields": ",".join(fields)}
+                resp = await client.get(url, params=params)
+                resp.raise_for_status()
+                data = resp.json()
+                
+                issues = []
+                for issue in data.get("issues", []):
+                    issues.append({
+                        "key": issue.get("key"),
+                        "fields": issue.get("fields", {})
+                    })
+                
+                return {"issues": issues, "total": data.get("total", 0)}, "success"
+                
+        except httpx.HTTPStatusError as e:
+            return {"error": f"API error: {e.response.text}"}, "error"
+        except Exception as e:
+            return {"error": str(e)}, "error"
