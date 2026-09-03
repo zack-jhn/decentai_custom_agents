@@ -1,0 +1,117 @@
+schema_version: "1.0"
+
+agent:
+  id: jira
+  name: Jira Agent
+  version: "1.0.0"
+  description: >
+    Manages Jira issues, including searching for tickets, logging work,
+    and transitioning issues between statuses.
+  tags:
+    - jira
+    - productivity
+    - task-management
+  instructions: >
+    Use the Jira tools to help the user manage their tasks. You can list their 
+    assigned issues, log time spent on specific issues, and update issue statuses.
+    When a user asks to see their tickets, default to showing unresolved tickets assigned to them.
+    Always confirm the issue key before logging work or changing status.
+
+implementation:
+  entrypoint: agent:JiraAgent
+  dependencies:
+    - "httpx>=0.24,<1"
+
+resources:
+  secrets:
+    - id: jira_connection
+      label: Jira Connection
+      description: Jira URL, Email, and API Token for authentication.
+      binding: {cardinality: one, required: true}
+      fields:
+        - {name: base_url, label: Base URL, type: string, storage: keys, required: true}
+        - {name: email, label: Email, type: string, storage: keys, required: true}
+        - {name: api_token, label: API Token, type: secret, storage: values, required: true}
+
+tools:
+  - id: jira
+    name: Jira Tool
+    description: Interacts with Jira API to list issues, log work, and change statuses.
+    resources:
+      secrets: [jira_connection]
+    functions:
+      - id: list_issues
+        name: List Issues
+        description: Search for Jira issues using JQL.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.list_issues
+        inputs:
+          type: object
+          additionalProperties: false
+          properties:
+            jql: {type: string, description: "Jira Query Language string. Default is unresolved assigned to current user."}
+            limit: {type: integer, minimum: 1, maximum: 50, default: 10}
+        outputs:
+          type: object
+          required: [issues, total]
+          properties:
+            issues:
+              type: array
+              items:
+                type: object
+                properties:
+                  key: {type: string}
+                  summary: {type: string}
+                  status: {type: string}
+            total: {type: integer}
+
+      - id: log_work
+        name: Log Work
+        description: Log time spent on a specific Jira issue.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.log_work
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key, time_spent]
+          properties:
+            issue_key: {type: string, description: "The Jira issue key, e.g., PROJ-123"}
+            time_spent: {type: string, description: "Time spent, e.g., '2h', '30m', '1d'"}
+            comment: {type: string, description: "Optional description of the work done"}
+        outputs:
+          type: object
+          required: [success, message]
+          properties:
+            success: {type: boolean}
+            message: {type: string}
+
+      - id: transition_issue
+        name: Transition Issue
+        description: Move an issue to a new status (e.g., 'Done', 'In Progress').
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.transition_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key, new_status]
+          properties:
+            issue_key: {type: string}
+            new_status: {type: string, description: "The name of the target status, e.g., 'Done'"}
+        outputs:
+          type: object
+          required: [success, message]
+          properties:
+            success: {type: boolean}
+            message: {type: string}
