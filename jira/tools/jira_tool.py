@@ -33,7 +33,7 @@ class JiraTool(ToolBase):
         try:
             base_url, client = await self._get_client(call)
             async with client:
-                url = f"{base_url}/rest/api/2/search"
+                url = f"{base_url}/rest/api/3/search"
                 params = {"jql": jql, "maxResults": limit, "fields": "summary,status"}
                 resp = await client.get(url, params=params)
                 resp.raise_for_status()
@@ -64,7 +64,7 @@ class JiraTool(ToolBase):
         try:
             base_url, client = await self._get_client(call)
             async with client:
-                url = f"{base_url}/rest/api/2/issue/{issue_key}/worklog"
+                url = f"{base_url}/rest/api/3/issue/{issue_key}/worklog"
                 payload = {"timeSpent": time_spent}
                 if comment:
                     payload["comment"] = comment
@@ -89,7 +89,7 @@ class JiraTool(ToolBase):
             base_url, client = await self._get_client(call)
             async with client:
                 # First, get available transitions
-                url = f"{base_url}/rest/api/2/issue/{issue_key}/transitions"
+                url = f"{base_url}/rest/api/3/issue/{issue_key}/transitions"
                 resp = await client.get(url)
                 resp.raise_for_status()
                 
@@ -127,7 +127,7 @@ class JiraTool(ToolBase):
         try:
             base_url, client = await self._get_client(call)
             async with client:
-                url = f"{base_url}/rest/api/2/issue/{issue_key}"
+                url = f"{base_url}/rest/api/3/issue/{issue_key}"
                 resp = await client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
@@ -158,7 +158,7 @@ class JiraTool(ToolBase):
         try:
             base_url, client = await self._get_client(call)
             async with client:
-                url = f"{base_url}/rest/api/2/issue"
+                url = f"{base_url}/rest/api/3/issue"
                 payload = {
                     "fields": {
                         "project": {"key": project_key},
@@ -187,7 +187,7 @@ class JiraTool(ToolBase):
         try:
             base_url, client = await self._get_client(call)
             async with client:
-                url = f"{base_url}/rest/api/2/issue/{issue_key}/assignee"
+                url = f"{base_url}/rest/api/3/issue/{issue_key}/assignee"
                 # Jira Cloud uses accountId, Jira Data Center uses name. 
                 # We'll try accountId first as it's the most common target right now for Cloud.
                 payload = {"accountId": account_id}
@@ -210,7 +210,7 @@ class JiraTool(ToolBase):
         try:
             base_url, client = await self._get_client(call)
             async with client:
-                url = f"{base_url}/rest/api/2/issue/{issue_key}/comment"
+                url = f"{base_url}/rest/api/3/issue/{issue_key}/comment"
                 payload = {"body": comment}
                 resp = await client.post(url, json=payload)
                 resp.raise_for_status()
