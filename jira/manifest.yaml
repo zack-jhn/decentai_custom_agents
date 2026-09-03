@@ -53,7 +53,7 @@ tools:
           type: object
           additionalProperties: false
           properties:
-            jql: {type: string, description: "Jira Query Language string. Default is unresolved assigned to current user."}
+            jql: {type: string}
             limit: {type: integer, minimum: 1, maximum: 50, default: 10}
         outputs:
           type: object
@@ -83,9 +83,9 @@ tools:
           additionalProperties: false
           required: [issue_key, time_spent]
           properties:
-            issue_key: {type: string, description: "The Jira issue key, e.g., PROJ-123"}
-            time_spent: {type: string, description: "Time spent, e.g., '2h', '30m', '1d'"}
-            comment: {type: string, description: "Optional description of the work done"}
+            issue_key: {type: string}
+            time_spent: {type: string}
+            comment: {type: string}
         outputs:
           type: object
           required: [success, message]
@@ -108,7 +108,7 @@ tools:
           required: [issue_key, new_status]
           properties:
             issue_key: {type: string}
-            new_status: {type: string, description: "The name of the target status, e.g., 'Done'"}
+            new_status: {type: string}
         outputs:
           type: object
           required: [success, message]
