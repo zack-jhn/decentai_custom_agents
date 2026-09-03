@@ -115,3 +115,101 @@ tools:
           properties:
             success: {type: boolean}
             message: {type: string}
+
+      - id: get_issue
+        name: Get Issue Details
+        description: Get the full details of a specific Jira issue.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.get_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key]
+          properties:
+            issue_key: {type: string}
+        outputs:
+          type: object
+          required: [key, summary, description, status]
+          properties:
+            key: {type: string}
+            summary: {type: string}
+            description: {type: string}
+            status: {type: string}
+            assignee: {type: string}
+            reporter: {type: string}
+
+      - id: create_issue
+        name: Create Issue
+        description: Create a new Jira issue.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.create_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [project_key, summary, issue_type]
+          properties:
+            project_key: {type: string}
+            summary: {type: string}
+            issue_type: {type: string}
+            description: {type: string}
+        outputs:
+          type: object
+          required: [success, issue_key, message]
+          properties:
+            success: {type: boolean}
+            issue_key: {type: string}
+            message: {type: string}
+
+      - id: assign_issue
+        name: Assign Issue
+        description: Assign a Jira issue to a user (by accountId).
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.assign_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key, account_id]
+          properties:
+            issue_key: {type: string}
+            account_id: {type: string}
+        outputs:
+          type: object
+          required: [success, message]
+          properties:
+            success: {type: boolean}
+            message: {type: string}
+
+      - id: add_comment
+        name: Add Comment
+        description: Add a comment to a Jira issue.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.add_comment
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key, comment]
+          properties:
+            issue_key: {type: string}
+            comment: {type: string}
+        outputs:
+          type: object
+          required: [success, message]
+          properties:
+            success: {type: boolean}
+            message: {type: string}

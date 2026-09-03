@@ -119,3 +119,105 @@ class JiraTool(ToolBase):
             return {"success": False, "message": f"API error: {e.response.text}"}, "error"
         except Exception as e:
             return {"success": False, "message": str(e)}, "error"
+
+    async def get_issue(self, call):
+        issue_key = str(call.inputs["issue_key"])
+        await call.progress(f"Fetching details for {issue_key}")
+        
+        try:
+            base_url, client = await self._get_client(call)
+            async with client:
+                url = f"{base_url}/rest/api/2/issue/{issue_key}"
+                resp = await client.get(url)
+                resp.raise_for_status()
+                data = resp.json()
+                fields = data.get("fields", {})
+                
+                return {
+                    "key": data.get("key"),
+                    "summary": fields.get("summary", ""),
+                    "description": fields.get("description", "") or "",
+                    "status": fields.get("status", {}).get("name", ""),
+                    "assignee": fields.get("assignee", {}).get("displayName", "Unassigned") if fields.get("assignee") else "Unassigned",
+                    "reporter": fields.get("reporter", {}).get("displayName", "Unknown") if fields.get("reporter") else "Unknown"
+                }, "success"
+                
+        except httpx.HTTPStatusError as e:
+            return {"error": f"API error: {e.response.text}"}, "error"
+        except Exception as e:
+            return {"error": str(e)}, "error"
+
+    async def create_issue(self, call):
+        project_key = str(call.inputs["project_key"])
+        summary = str(call.inputs["summary"])
+        issue_type = str(call.inputs["issue_type"])
+        description = call.inputs.get("description", "")
+
+        await call.progress(f"Creating {issue_type} in {project_key}")
+        
+        try:
+            base_url, client = await self._get_client(call)
+            async with client:
+                url = f"{base_url}/rest/api/2/issue"
+                payload = {
+                    "fields": {
+                        "project": {"key": project_key},
+                        "summary": summary,
+                        "description": description,
+                        "issuetype": {"name": issue_type}
+                    }
+                }
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                
+                issue_key = resp.json().get("key")
+                return {"success": True, "issue_key": issue_key, "message": f"Created {issue_key}"}, "success"
+                
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "issue_key": "", "message": f"API error: {e.response.text}"}, "error"
+        except Exception as e:
+            return {"success": False, "issue_key": "", "message": str(e)}, "error"
+
+    async def assign_issue(self, call):
+        issue_key = str(call.inputs["issue_key"])
+        account_id = str(call.inputs["account_id"])
+
+        await call.progress(f"Assigning {issue_key}")
+        
+        try:
+            base_url, client = await self._get_client(call)
+            async with client:
+                url = f"{base_url}/rest/api/2/issue/{issue_key}/assignee"
+                # Jira Cloud uses accountId, Jira Data Center uses name. 
+                # We'll try accountId first as it's the most common target right now for Cloud.
+                payload = {"accountId": account_id}
+                resp = await client.put(url, json=payload)
+                resp.raise_for_status()
+                
+                return {"success": True, "message": f"Successfully assigned {issue_key}"}, "success"
+                
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "message": f"API error: {e.response.text}"}, "error"
+        except Exception as e:
+            return {"success": False, "message": str(e)}, "error"
+
+    async def add_comment(self, call):
+        issue_key = str(call.inputs["issue_key"])
+        comment = str(call.inputs["comment"])
+
+        await call.progress(f"Adding comment to {issue_key}")
+        
+        try:
+            base_url, client = await self._get_client(call)
+            async with client:
+                url = f"{base_url}/rest/api/2/issue/{issue_key}/comment"
+                payload = {"body": comment}
+                resp = await client.post(url, json=payload)
+                resp.raise_for_status()
+                
+                return {"success": True, "message": f"Comment added to {issue_key}"}, "success"
+                
+        except httpx.HTTPStatusError as e:
+            return {"success": False, "message": f"API error: {e.response.text}"}, "error"
+        except Exception as e:
+            return {"success": False, "message": str(e)}, "error"
