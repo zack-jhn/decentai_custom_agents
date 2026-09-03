@@ -1,0 +1,116 @@
+schema_version: "1.0"
+
+agent:
+  id: github
+  name: GitHub Agent
+  version: "1.0.0"
+  description: >
+    Manages GitHub repositories, issues, and pull requests. Perfect for integrating
+    code workflows with task management.
+  tags:
+    - github
+    - engineering
+    - code
+  instructions: >
+    Use the GitHub tools to interact with repositories, issues, and PRs.
+    This agent pairs well with the Jira agent to link engineering work (PRs/commits)
+    back to Jira tasks. Always read PR diffs to summarize them before asking for reviews.
+
+implementation:
+  entrypoint: agent:GitHubAgent
+  dependencies:
+    - "httpx>=0.24,<1"
+
+resources:
+  secrets:
+    - id: github_token
+      label: GitHub Personal Access Token
+      description: A GitHub Personal Access Token (classic or fine-grained) for API access.
+      binding: {cardinality: one, required: true}
+      fields:
+        - {name: token, label: Access Token, type: secret, storage: values, required: true}
+
+tools:
+  - id: github
+    name: GitHub Tool
+    description: Interacts with GitHub to manage issues and pull requests.
+    resources:
+      secrets: [github_token]
+    functions:
+      - id: list_prs
+        name: List Pull Requests
+        description: List open pull requests for a repository.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {github_token: use}
+        authorization:
+          action: github.list_prs
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [owner, repo]
+          properties:
+            owner: {type: string}
+            repo: {type: string}
+        outputs:
+          type: object
+          required: [prs]
+          properties:
+            prs:
+              type: array
+              items:
+                type: object
+                properties:
+                  number: {type: integer}
+                  title: {type: string}
+                  state: {type: string}
+                  author: {type: string}
+
+      - id: get_pr_diff
+        name: Get PR Diff
+        description: Get the diff of a pull request for summarization or review.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {github_token: use}
+        authorization:
+          action: github.get_pr_diff
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [owner, repo, pr_number]
+          properties:
+            owner: {type: string}
+            repo: {type: string}
+            pr_number: {type: integer}
+        outputs:
+          type: object
+          required: [diff_content]
+          properties:
+            diff_content: {type: string}
+
+      - id: create_issue
+        name: Create GitHub Issue
+        description: Create an issue in a GitHub repository.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {github_token: use}
+        authorization:
+          action: github.create_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [owner, repo, title, body]
+          properties:
+            owner: {type: string}
+            repo: {type: string}
+            title: {type: string}
+            body: {type: string}
+        outputs:
+          type: object
+          required: [success, issue_url]
+          properties:
+            success: {type: boolean}
+            issue_url: {type: string}

@@ -8,3 +8,5 @@ catalog:
 agents:
   - id: jira
     path: jira
+  - id: github
+    path: github
