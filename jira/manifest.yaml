@@ -3,19 +3,22 @@ schema_version: "1.0"
 agent:
   id: jira
   name: Jira Agent
-  version: "1.1.0"
+  version: "1.2.0"
   description: >
-    Manages Jira issues, including searching for tickets, logging work,
-    and transitioning issues between statuses.
+    Manages Jira Cloud issues: searches with JQL, reads issue details,
+    creates issues, logs work, moves issues between statuses, assigns
+    people and adds comments. Talks to the Jira Cloud REST API v3.
   tags:
     - jira
     - productivity
     - task-management
   instructions: >
-    Use the Jira tools to help the user manage their tasks. You can list their 
-    assigned issues, log time spent on specific issues, and update issue statuses.
-    When a user asks to see their tickets, default to showing unresolved tickets assigned to them.
-    Always confirm the issue key before logging work or changing status.
+    Use the Jira tools to help the user manage their work. When asked for
+    "my tickets", default to unresolved issues assigned to them. Always
+    confirm the issue key before logging work, changing status, assigning
+    or commenting. People are assigned by account id: use search_users to
+    find it from a name or email first. When a transition is refused, tell
+    the user which statuses are reachable from the current one.
 
 implementation:
   entrypoint: agent:JiraAgent
@@ -26,23 +29,30 @@ resources:
   secrets:
     - id: jira_connection
       label: Jira Connection
-      description: Jira URL, Email, and API Token for authentication.
+      description: >
+        The Jira Cloud site URL (https://your-site.atlassian.net), the
+        email of the account, and an API token created for it.
       binding: {cardinality: one, required: true}
       fields:
-        - {name: base_url, label: Base URL, type: string, storage: keys, required: true}
+        - {name: base_url, label: Site URL, type: string, storage: keys, required: true}
         - {name: email, label: Email, type: string, storage: keys, required: true}
         - {name: api_token, label: API Token, type: secret, storage: values, required: true}
 
 tools:
   - id: jira
     name: Jira Tool
-    description: Interacts with Jira API to list issues, log work, and change statuses.
+    description: Searches, reads and changes Jira issues.
     resources:
       secrets: [jira_connection]
     functions:
+
+      # ---- reads ---------------------------------------------------
+
       - id: list_issues
         name: List Issues
-        description: Search for Jira issues using JQL.
+        description: >
+          Search for issues with JQL. Without a query, lists the user's
+          own unresolved issues, most recently updated first.
         permission_level: 0
         timeout_seconds: 30
         resources:
@@ -63,160 +73,22 @@ tools:
               type: array
               items:
                 type: object
+                required: [key, summary, status]
                 properties:
                   key: {type: string}
                   summary: {type: string}
                   status: {type: string}
+                  assignee: {type: string}
+                  issue_type: {type: string}
+                  url: {type: string}
             total: {type: integer}
-
-      - id: log_work
-        name: Log Work
-        description: Log time spent on a specific Jira issue.
-        permission_level: 1
-        timeout_seconds: 30
-        resources:
-          secrets: {jira_connection: use}
-        authorization:
-          action: jira.log_work
-        inputs:
-          type: object
-          additionalProperties: false
-          required: [issue_key, time_spent]
-          properties:
-            issue_key: {type: string}
-            time_spent: {type: string}
-            comment: {type: string}
-        outputs:
-          type: object
-          required: [success, message]
-          properties:
-            success: {type: boolean}
-            message: {type: string}
-
-      - id: transition_issue
-        name: Transition Issue
-        description: Move an issue to a new status (e.g., 'Done', 'In Progress').
-        permission_level: 1
-        timeout_seconds: 30
-        resources:
-          secrets: {jira_connection: use}
-        authorization:
-          action: jira.transition_issue
-        inputs:
-          type: object
-          additionalProperties: false
-          required: [issue_key, new_status]
-          properties:
-            issue_key: {type: string}
-            new_status: {type: string}
-        outputs:
-          type: object
-          required: [success, message]
-          properties:
-            success: {type: boolean}
-            message: {type: string}
-
-      - id: get_issue
-        name: Get Issue Details
-        description: Get the full details of a specific Jira issue.
-        permission_level: 0
-        timeout_seconds: 30
-        resources:
-          secrets: {jira_connection: use}
-        authorization:
-          action: jira.get_issue
-        inputs:
-          type: object
-          additionalProperties: false
-          required: [issue_key]
-          properties:
-            issue_key: {type: string}
-        outputs:
-          type: object
-          required: [key, summary, description, status]
-          properties:
-            key: {type: string}
-            summary: {type: string}
-            description: {type: string}
-            status: {type: string}
-            assignee: {type: string}
-            reporter: {type: string}
-
-      - id: create_issue
-        name: Create Issue
-        description: Create a new Jira issue.
-        permission_level: 1
-        timeout_seconds: 30
-        resources:
-          secrets: {jira_connection: use}
-        authorization:
-          action: jira.create_issue
-        inputs:
-          type: object
-          additionalProperties: false
-          required: [project_key, summary, issue_type]
-          properties:
-            project_key: {type: string}
-            summary: {type: string}
-            issue_type: {type: string}
-            description: {type: string}
-        outputs:
-          type: object
-          required: [success, issue_key, message]
-          properties:
-            success: {type: boolean}
-            issue_key: {type: string}
-            message: {type: string}
-
-      - id: assign_issue
-        name: Assign Issue
-        description: Assign a Jira issue to a user (by accountId).
-        permission_level: 1
-        timeout_seconds: 30
-        resources:
-          secrets: {jira_connection: use}
-        authorization:
-          action: jira.assign_issue
-        inputs:
-          type: object
-          additionalProperties: false
-          required: [issue_key, account_id]
-          properties:
-            issue_key: {type: string}
-            account_id: {type: string}
-        outputs:
-          type: object
-          required: [success, message]
-          properties:
-            success: {type: boolean}
-            message: {type: string}
-
-      - id: add_comment
-        name: Add Comment
-        description: Add a comment to a Jira issue.
-        permission_level: 1
-        timeout_seconds: 30
-        resources:
-          secrets: {jira_connection: use}
-        authorization:
-          action: jira.add_comment
-        inputs:
-          type: object
-          additionalProperties: false
-          required: [issue_key, comment]
-          properties:
-            issue_key: {type: string}
-            comment: {type: string}
-        outputs:
-          type: object
-          required: [success, message]
-          properties:
-            success: {type: boolean}
-            message: {type: string}
 
       - id: execute_jql
         name: Execute Custom JQL
-        description: Execute any arbitrary JQL query and retrieve specified fields for matching issues.
+        description: >
+          Run any JQL query and return the requested fields of each
+          matching issue, as Jira names them (summary, status, assignee,
+          priority, labels, created, ...). Descriptions come back as text.
         permission_level: 0
         timeout_seconds: 45
         resources:
@@ -241,7 +113,207 @@ tools:
               type: array
               items:
                 type: object
+                required: [key, fields]
                 properties:
                   key: {type: string}
                   fields: {type: object}
             total: {type: integer}
+
+      - id: get_issue
+        name: Get Issue Details
+        description: The full details of one issue, description as plain text.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.get_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key]
+          properties:
+            issue_key: {type: string}
+        outputs:
+          type: object
+          required: [key, summary, description, status]
+          properties:
+            key: {type: string}
+            summary: {type: string}
+            description: {type: string}
+            status: {type: string}
+            assignee: {type: string}
+            reporter: {type: string}
+            issue_type: {type: string}
+            priority: {type: string}
+            labels:
+              type: array
+              items: {type: string}
+            created: {type: string}
+            updated: {type: string}
+            url: {type: string}
+
+      - id: search_users
+        name: Search Users
+        description: >
+          Find Jira users by name or email, to get the account id that
+          assign_issue needs.
+        permission_level: 0
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.search_users
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [query]
+          properties:
+            query: {type: string, minLength: 1}
+            limit: {type: integer, minimum: 1, maximum: 50, default: 10}
+        outputs:
+          type: object
+          required: [users]
+          properties:
+            users:
+              type: array
+              items:
+                type: object
+                required: [account_id, display_name]
+                properties:
+                  account_id: {type: string}
+                  display_name: {type: string}
+                  email: {type: string}
+                  active: {type: boolean}
+
+      # ---- writes ---------------------------------------------------
+
+      - id: log_work
+        name: Log Work
+        description: >
+          Log time spent on an issue. time_spent uses Jira's format, such
+          as "30m", "2h" or "1d 4h".
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.log_work
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key, time_spent]
+          properties:
+            issue_key: {type: string}
+            time_spent: {type: string}
+            comment: {type: string}
+        outputs:
+          type: object
+          required: [issue_key, message]
+          properties:
+            issue_key: {type: string}
+            worklog_id: {type: string}
+            message: {type: string}
+
+      - id: transition_issue
+        name: Transition Issue
+        description: >
+          Move an issue to another status, such as "In Progress" or
+          "Done". Either the status name or the transition name works.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.transition_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key, new_status]
+          properties:
+            issue_key: {type: string}
+            new_status: {type: string}
+        outputs:
+          type: object
+          required: [issue_key, status, message]
+          properties:
+            issue_key: {type: string}
+            status: {type: string}
+            message: {type: string}
+
+      - id: create_issue
+        name: Create Issue
+        description: >
+          Create an issue in a project. issue_type is the name Jira shows,
+          such as "Task", "Bug" or "Story".
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.create_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [project_key, summary, issue_type]
+          properties:
+            project_key: {type: string}
+            summary: {type: string, minLength: 1}
+            issue_type: {type: string}
+            description: {type: string}
+        outputs:
+          type: object
+          required: [issue_key, url, message]
+          properties:
+            issue_key: {type: string}
+            url: {type: string}
+            message: {type: string}
+
+      - id: assign_issue
+        name: Assign Issue
+        description: >
+          Assign an issue to a person by account id (find it with
+          search_users), or pass "none" to unassign.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.assign_issue
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key, account_id]
+          properties:
+            issue_key: {type: string}
+            account_id: {type: string}
+        outputs:
+          type: object
+          required: [issue_key, message]
+          properties:
+            issue_key: {type: string}
+            message: {type: string}
+
+      - id: add_comment
+        name: Add Comment
+        description: Add a comment to an issue.
+        permission_level: 1
+        timeout_seconds: 30
+        resources:
+          secrets: {jira_connection: use}
+        authorization:
+          action: jira.add_comment
+        inputs:
+          type: object
+          additionalProperties: false
+          required: [issue_key, comment]
+          properties:
+            issue_key: {type: string}
+            comment: {type: string, minLength: 1}
+        outputs:
+          type: object
+          required: [issue_key, message]
+          properties:
+            issue_key: {type: string}
+            comment_id: {type: string}
+            message: {type: string}

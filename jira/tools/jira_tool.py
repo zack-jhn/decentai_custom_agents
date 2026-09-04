@@ -1,253 +1,405 @@
-"""Jira API interactions."""
+"""Jira Cloud (REST API v3) interactions.
+
+Everything here follows from two facts about v3. Rich text — comments,
+worklog comments, descriptions — is Atlassian Document Format (ADF), not
+a string: text is wrapped on the way out and flattened on the way back.
+And search is ``/search/jql``, which pages by token and never reports a
+total; the approximate-count endpoint answers that separately.
+
+Stateless: a client is built per call from the bound connection and
+closed with it.
+"""
 
 import httpx
 from decentai_sdk.base import ToolBase
 
+#: Under the shortest function timeout, so a slow Jira answers as a
+#: readable error rather than a killed worker.
+TIMEOUT = httpx.Timeout(20.0)
+
+DEFAULT_JQL = (
+    "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC"
+)
+
+#: What a listing shows for one issue.
+BRIEF_FIELDS = "summary,status,assignee,issuetype"
+
+#: What the detail view shows.
+DETAIL_FIELDS = (
+    "summary,description,status,assignee,reporter,issuetype,priority,"
+    "labels,created,updated"
+)
+
+#: Words that mean "nobody" when assigning.
+UNASSIGN = {"", "none", "null", "nobody", "unassigned", "unassign", "-1"}
+
+
+class JiraError(Exception):
+    """A refusal this tool can explain in one sentence."""
+
+
+def adf(text):
+    """Plain text as an ADF document: blank-line-separated paragraphs,
+    single newlines as hard breaks. Empty text nodes are invalid ADF, so
+    empty lines are skipped rather than emitted."""
+    content = []
+    for paragraph in str(text or "").replace("\r\n", "\n").split("\n\n"):
+        nodes = []
+        for line in paragraph.split("\n"):
+            if nodes:
+                nodes.append({"type": "hardBreak"})
+            if line:
+                nodes.append({"type": "text", "text": line})
+        content.append({"type": "paragraph", "content": nodes})
+    return {"type": "doc", "version": 1, "content": content}
+
+
+#: ADF nodes that end a line when flattened.
+BLOCK_NODES = {
+    "paragraph", "heading", "codeBlock", "blockquote", "listItem",
+    "panel", "tableRow", "mediaSingle",
+}
+
+
+def plain_text(node):
+    """Whatever Jira hands back for a rich-text field, as plain text — an
+    ADF document (Cloud), a string (Data Center, or API v2), or nothing.
+    Structure is kept only as far as line breaks and list dashes."""
+    if node is None:
+        return ""
+    if isinstance(node, str):
+        return node
+    if isinstance(node, list):
+        return "".join(plain_text(child) for child in node)
+    if not isinstance(node, dict):
+        return str(node)
+
+    kind = node.get("type")
+    attrs = node.get("attrs") or {}
+    if kind == "text":
+        return str(node.get("text") or "")
+    if kind == "hardBreak":
+        return "\n"
+    if kind in ("mention", "emoji"):
+        return str(attrs.get("text") or "")
+    if kind == "inlineCard":
+        return str(attrs.get("url") or "")
+    if kind == "rule":
+        return "---\n"
+
+    inner = plain_text(node.get("content") or [])
+    if kind == "listItem":
+        inner = "- " + inner
+    if kind == "doc":
+        return inner.strip()
+    return inner + ("\n" if kind in BLOCK_NODES else "")
+
+
+def error_message(response):
+    """Jira's own words for a refusal, when it gives any."""
+    try:
+        body = response.json()
+    except ValueError:
+        body = None
+    messages = []
+    if isinstance(body, dict):
+        messages += [str(m) for m in body.get("errorMessages") or []]
+        messages += [f"{field}: {reason}"
+                     for field, reason in (body.get("errors") or {}).items()]
+    detail = ("; ".join(messages) or response.text.strip()[:300]
+              or response.reason_phrase)
+    return f"Jira answered {response.status_code}: {detail}"
+
+
+def person(value, absent):
+    return str((value or {}).get("displayName") or absent)
+
+
 class JiraTool(ToolBase):
     id = "jira"
 
-    async def _get_client(self, call):
-        """Helper to get an authenticated httpx client and base URL."""
+    # ------------------------------------------------------------------
+    # The connection, and the one way every function runs
+    # ------------------------------------------------------------------
+
+    async def _connection(self, call):
+        """The bound connection as (site url, client), or JiraError."""
         try:
             secret = await call.resources.use_secret("jira_connection")
         except Exception:
-            raise ValueError("No Jira connection secret bound")
-        
-        base_url = secret.get("base_url", "").rstrip("/")
-        email = secret.get("email")
-        api_token = secret.get("api_token")
-        
-        if not all([base_url, email, api_token]):
-            raise ValueError("Incomplete Jira connection secrets")
-            
-        auth = httpx.BasicAuth(email, api_token)
-        headers = {"Accept": "application/json", "Content-Type": "application/json"}
-        return base_url, httpx.AsyncClient(auth=auth, headers=headers)
+            raise JiraError("No Jira connection is bound to this agent.")
+
+        base_url = str(secret.get("base_url") or "").strip().rstrip("/")
+        email = str(secret.get("email") or "").strip()
+        token = str(secret.get("api_token") or "").strip()
+        missing = [name for name, value in (
+            ("base_url", base_url), ("email", email), ("api_token", token),
+        ) if not value]
+        if missing:
+            raise JiraError(
+                "The Jira connection is incomplete — missing: "
+                + ", ".join(missing) + ".")
+        if "://" not in base_url:
+            base_url = "https://" + base_url
+
+        client = httpx.AsyncClient(
+            base_url=base_url + "/rest/api/3",
+            auth=httpx.BasicAuth(email, token),
+            headers={"Accept": "application/json"},
+            timeout=TIMEOUT,
+        )
+        return base_url, client
+
+    async def _run(self, call, action):
+        """Run one action against the connection. Every way it can fail
+        comes back as an error result; nothing raises past here."""
+        try:
+            base_url, client = await self._connection(call)
+            async with client:
+                return await action(base_url, client), "success"
+        except JiraError as exc:
+            return {"error": str(exc)}, "error"
+        except httpx.HTTPStatusError as exc:
+            return {"error": error_message(exc.response)}, "error"
+        except httpx.HTTPError as exc:
+            return {"error": f"Could not reach Jira: {exc}"}, "error"
+
+    # ------------------------------------------------------------------
+    # Shared requests
+    # ------------------------------------------------------------------
+
+    async def _search(self, client, jql, limit, fields):
+        response = await client.get("/search/jql", params={
+            "jql": jql, "maxResults": limit, "fields": fields,
+        })
+        response.raise_for_status()
+        return response.json().get("issues") or []
+
+    async def _count(self, client, jql, fallback):
+        """How many issues match — Jira's approximate count, or what was
+        returned when the count cannot be had. A count that fails must
+        not fail the search it decorates."""
+        try:
+            response = await client.post(
+                "/search/approximate-count", json={"jql": jql})
+            response.raise_for_status()
+            return int(response.json().get("count") or 0)
+        except (httpx.HTTPError, ValueError, TypeError):
+            return fallback
+
+    @staticmethod
+    def _brief(base_url, issue):
+        fields = issue.get("fields") or {}
+        return {
+            "key": str(issue.get("key") or ""),
+            "summary": str(fields.get("summary") or ""),
+            "status": str((fields.get("status") or {}).get("name") or ""),
+            "assignee": person(fields.get("assignee"), "Unassigned"),
+            "issue_type": str((fields.get("issuetype") or {}).get("name") or ""),
+            "url": f"{base_url}/browse/{issue.get('key')}",
+        }
+
+    # ------------------------------------------------------------------
+    # Reads
+    # ------------------------------------------------------------------
 
     async def list_issues(self, call):
-        jql = call.inputs.get("jql") or "assignee = currentUser() AND resolution = Unresolved ORDER BY updated DESC"
+        jql = str(call.inputs.get("jql") or DEFAULT_JQL)
         limit = int(call.inputs.get("limit") or 10)
+        await call.progress(f"Searching Jira issues (limit {limit})")
 
-        await call.progress(f"Searching Jira issues (limit: {limit})")
-        
-        try:
-            base_url, client = await self._get_client(call)
-            async with client:
-                url = f"{base_url}/rest/api/3/search/jql"
-                params = {"jql": jql, "maxResults": limit, "fields": "summary,status"}
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                data = resp.json()
-                
-                issues = []
-                for issue in data.get("issues", []):
-                    issues.append({
-                        "key": issue["key"],
-                        "summary": issue["fields"]["summary"],
-                        "status": issue["fields"]["status"]["name"]
-                    })
-                
-                return {"issues": issues, "total": data.get("total", 0)}, "success"
-                
-        except httpx.HTTPStatusError as e:
-            return {"error": f"Jira API HTTP error: {e.response.status_code} - {e.response.text}"}, "error"
-        except Exception as e:
-            return {"error": str(e)}, "error"
-
-    async def log_work(self, call):
-        issue_key = str(call.inputs["issue_key"])
-        time_spent = str(call.inputs["time_spent"])
-        comment = call.inputs.get("comment", "")
-
-        await call.progress(f"Logging {time_spent} on {issue_key}")
-        
-        try:
-            base_url, client = await self._get_client(call)
-            async with client:
-                url = f"{base_url}/rest/api/3/issue/{issue_key}/worklog"
-                payload = {"timeSpent": time_spent}
-                if comment:
-                    payload["comment"] = comment
-                    
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                
-                return {"success": True, "message": f"Successfully logged {time_spent} to {issue_key}"}, "success"
-                
-        except httpx.HTTPStatusError as e:
-            return {"success": False, "message": f"API error: {e.response.text}"}, "error"
-        except Exception as e:
-            return {"success": False, "message": str(e)}, "error"
-
-    async def transition_issue(self, call):
-        issue_key = str(call.inputs["issue_key"])
-        new_status = str(call.inputs["new_status"]).lower()
-
-        await call.progress(f"Moving {issue_key} to {new_status}")
-        
-        try:
-            base_url, client = await self._get_client(call)
-            async with client:
-                # First, get available transitions
-                url = f"{base_url}/rest/api/3/issue/{issue_key}/transitions"
-                resp = await client.get(url)
-                resp.raise_for_status()
-                
-                transitions = resp.json().get("transitions", [])
-                target_transition = None
-                
-                for t in transitions:
-                    if t["name"].lower() == new_status:
-                        target_transition = t
-                        break
-                        
-                if not target_transition:
-                    available = [t["name"] for t in transitions]
-                    return {
-                        "success": False, 
-                        "message": f"Status '{new_status}' not found. Available: {', '.join(available)}"
-                    }, "error"
-                
-                # Perform the transition
-                payload = {"transition": {"id": target_transition["id"]}}
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                
-                return {"success": True, "message": f"Successfully transitioned {issue_key} to {target_transition['name']}"}, "success"
-                
-        except httpx.HTTPStatusError as e:
-            return {"success": False, "message": f"API error: {e.response.text}"}, "error"
-        except Exception as e:
-            return {"success": False, "message": str(e)}, "error"
-
-    async def get_issue(self, call):
-        issue_key = str(call.inputs["issue_key"])
-        await call.progress(f"Fetching details for {issue_key}")
-        
-        try:
-            base_url, client = await self._get_client(call)
-            async with client:
-                url = f"{base_url}/rest/api/3/issue/{issue_key}"
-                resp = await client.get(url)
-                resp.raise_for_status()
-                data = resp.json()
-                fields = data.get("fields", {})
-                
-                return {
-                    "key": data.get("key"),
-                    "summary": fields.get("summary", ""),
-                    "description": fields.get("description", "") or "",
-                    "status": fields.get("status", {}).get("name", ""),
-                    "assignee": fields.get("assignee", {}).get("displayName", "Unassigned") if fields.get("assignee") else "Unassigned",
-                    "reporter": fields.get("reporter", {}).get("displayName", "Unknown") if fields.get("reporter") else "Unknown"
-                }, "success"
-                
-        except httpx.HTTPStatusError as e:
-            return {"error": f"API error: {e.response.text}"}, "error"
-        except Exception as e:
-            return {"error": str(e)}, "error"
-
-    async def create_issue(self, call):
-        project_key = str(call.inputs["project_key"])
-        summary = str(call.inputs["summary"])
-        issue_type = str(call.inputs["issue_type"])
-        description = call.inputs.get("description", "")
-
-        await call.progress(f"Creating {issue_type} in {project_key}")
-        
-        try:
-            base_url, client = await self._get_client(call)
-            async with client:
-                url = f"{base_url}/rest/api/3/issue"
-                payload = {
-                    "fields": {
-                        "project": {"key": project_key},
-                        "summary": summary,
-                        "description": description,
-                        "issuetype": {"name": issue_type}
-                    }
-                }
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                
-                issue_key = resp.json().get("key")
-                return {"success": True, "issue_key": issue_key, "message": f"Created {issue_key}"}, "success"
-                
-        except httpx.HTTPStatusError as e:
-            return {"success": False, "issue_key": "", "message": f"API error: {e.response.text}"}, "error"
-        except Exception as e:
-            return {"success": False, "issue_key": "", "message": str(e)}, "error"
-
-    async def assign_issue(self, call):
-        issue_key = str(call.inputs["issue_key"])
-        account_id = str(call.inputs["account_id"])
-
-        await call.progress(f"Assigning {issue_key}")
-        
-        try:
-            base_url, client = await self._get_client(call)
-            async with client:
-                url = f"{base_url}/rest/api/3/issue/{issue_key}/assignee"
-                # Jira Cloud uses accountId, Jira Data Center uses name. 
-                # We'll try accountId first as it's the most common target right now for Cloud.
-                payload = {"accountId": account_id}
-                resp = await client.put(url, json=payload)
-                resp.raise_for_status()
-                
-                return {"success": True, "message": f"Successfully assigned {issue_key}"}, "success"
-                
-        except httpx.HTTPStatusError as e:
-            return {"success": False, "message": f"API error: {e.response.text}"}, "error"
-        except Exception as e:
-            return {"success": False, "message": str(e)}, "error"
-
-    async def add_comment(self, call):
-        issue_key = str(call.inputs["issue_key"])
-        comment = str(call.inputs["comment"])
-
-        await call.progress(f"Adding comment to {issue_key}")
-        
-        try:
-            base_url, client = await self._get_client(call)
-            async with client:
-                url = f"{base_url}/rest/api/3/issue/{issue_key}/comment"
-                payload = {"body": comment}
-                resp = await client.post(url, json=payload)
-                resp.raise_for_status()
-                
-                return {"success": True, "message": f"Comment added to {issue_key}"}, "success"
-                
-        except httpx.HTTPStatusError as e:
-            return {"success": False, "message": f"API error: {e.response.text}"}, "error"
-        except Exception as e:
-            return {"success": False, "message": str(e)}, "error"
+        async def action(base_url, client):
+            issues = await self._search(client, jql, limit, BRIEF_FIELDS)
+            return {
+                "issues": [self._brief(base_url, issue) for issue in issues],
+                "total": await self._count(client, jql, len(issues)),
+            }
+        return await self._run(call, action)
 
     async def execute_jql(self, call):
         jql = str(call.inputs["jql"])
-        fields = call.inputs.get("fields") or ["summary", "status", "assignee"]
+        fields = ([str(f) for f in call.inputs.get("fields") or []]
+                  or ["summary", "status", "assignee"])
         max_results = int(call.inputs.get("max_results") or 50)
+        await call.progress(f"Executing JQL: {jql}")
 
-        await call.progress(f"Executing custom JQL: {jql}")
-        
-        try:
-            base_url, client = await self._get_client(call)
-            async with client:
-                url = f"{base_url}/rest/api/3/search/jql"
-                params = {"jql": jql, "maxResults": max_results, "fields": ",".join(fields)}
-                resp = await client.get(url, params=params)
-                resp.raise_for_status()
-                data = resp.json()
-                
-                issues = []
-                for issue in data.get("issues", []):
-                    issues.append({
-                        "key": issue.get("key"),
-                        "fields": issue.get("fields", {})
-                    })
-                
-                return {"issues": issues, "total": data.get("total", 0)}, "success"
-                
-        except httpx.HTTPStatusError as e:
-            return {"error": f"API error: {e.response.text}"}, "error"
-        except Exception as e:
-            return {"error": str(e)}, "error"
+        async def action(base_url, client):
+            issues = await self._search(
+                client, jql, max_results, ",".join(fields))
+            rows = []
+            for issue in issues:
+                found = dict(issue.get("fields") or {})
+                # The one rich-text field a query commonly asks for,
+                # readable rather than a document tree.
+                if "description" in found:
+                    found["description"] = plain_text(found["description"])
+                rows.append({"key": str(issue.get("key") or ""),
+                             "fields": found})
+            return {"issues": rows,
+                    "total": await self._count(client, jql, len(rows))}
+        return await self._run(call, action)
+
+    async def get_issue(self, call):
+        issue_key = str(call.inputs["issue_key"]).strip()
+        await call.progress(f"Fetching {issue_key}")
+
+        async def action(base_url, client):
+            response = await client.get(
+                f"/issue/{issue_key}", params={"fields": DETAIL_FIELDS})
+            response.raise_for_status()
+            data = response.json()
+            fields = data.get("fields") or {}
+            key = str(data.get("key") or issue_key)
+            return {
+                "key": key,
+                "summary": str(fields.get("summary") or ""),
+                "description": plain_text(fields.get("description")),
+                "status": str((fields.get("status") or {}).get("name") or ""),
+                "assignee": person(fields.get("assignee"), "Unassigned"),
+                "reporter": person(fields.get("reporter"), "Unknown"),
+                "issue_type": str((fields.get("issuetype") or {}).get("name") or ""),
+                "priority": str((fields.get("priority") or {}).get("name") or ""),
+                "labels": [str(label) for label in fields.get("labels") or []],
+                "created": str(fields.get("created") or ""),
+                "updated": str(fields.get("updated") or ""),
+                "url": f"{base_url}/browse/{key}",
+            }
+        return await self._run(call, action)
+
+    async def search_users(self, call):
+        query = str(call.inputs["query"]).strip()
+        limit = int(call.inputs.get("limit") or 10)
+        await call.progress(f"Searching Jira users for '{query}'")
+
+        async def action(base_url, client):
+            response = await client.get(
+                "/user/search", params={"query": query, "maxResults": limit})
+            response.raise_for_status()
+            users = []
+            for user in response.json() or []:
+                users.append({
+                    "account_id": str(user.get("accountId") or ""),
+                    "display_name": str(user.get("displayName") or ""),
+                    # Hidden unless the person's privacy settings allow it.
+                    "email": str(user.get("emailAddress") or ""),
+                    "active": bool(user.get("active", True)),
+                })
+            return {"users": users}
+        return await self._run(call, action)
+
+    # ------------------------------------------------------------------
+    # Writes
+    # ------------------------------------------------------------------
+
+    async def log_work(self, call):
+        issue_key = str(call.inputs["issue_key"]).strip()
+        time_spent = str(call.inputs["time_spent"]).strip()
+        comment = str(call.inputs.get("comment") or "").strip()
+        await call.progress(f"Logging {time_spent} on {issue_key}")
+
+        async def action(base_url, client):
+            payload = {"timeSpent": time_spent}
+            if comment:
+                payload["comment"] = adf(comment)
+            response = await client.post(
+                f"/issue/{issue_key}/worklog", json=payload)
+            response.raise_for_status()
+            return {
+                "issue_key": issue_key,
+                "worklog_id": str(response.json().get("id") or ""),
+                "message": f"Logged {time_spent} on {issue_key}.",
+            }
+        return await self._run(call, action)
+
+    async def transition_issue(self, call):
+        issue_key = str(call.inputs["issue_key"]).strip()
+        wanted = str(call.inputs["new_status"]).strip()
+        await call.progress(f"Moving {issue_key} to {wanted}")
+
+        async def action(base_url, client):
+            path = f"/issue/{issue_key}/transitions"
+            response = await client.get(path)
+            response.raise_for_status()
+            transitions = response.json().get("transitions") or []
+
+            # A person names the STATUS they want ("Done"); Jira offers
+            # TRANSITIONS ("Mark as done") that lead to one. Either name
+            # is accepted, case-insensitively.
+            target = wanted.lower()
+            chosen = next((t for t in transitions if target in (
+                str(t.get("name") or "").lower(),
+                str((t.get("to") or {}).get("name") or "").lower(),
+            )), None)
+            if chosen is None:
+                offered = sorted({
+                    str((t.get("to") or {}).get("name") or t.get("name") or "")
+                    for t in transitions})
+                raise JiraError(
+                    f"{issue_key} cannot move to '{wanted}' from here. "
+                    f"Available: {', '.join(offered) or 'none'}.")
+
+            response = await client.post(
+                path, json={"transition": {"id": str(chosen["id"])}})
+            response.raise_for_status()
+            reached = str((chosen.get("to") or {}).get("name")
+                          or chosen.get("name") or wanted)
+            return {"issue_key": issue_key, "status": reached,
+                    "message": f"Moved {issue_key} to {reached}."}
+        return await self._run(call, action)
+
+    async def create_issue(self, call):
+        project_key = str(call.inputs["project_key"]).strip()
+        summary = str(call.inputs["summary"]).strip()
+        issue_type = str(call.inputs["issue_type"]).strip()
+        description = str(call.inputs.get("description") or "").strip()
+        await call.progress(f"Creating a {issue_type} in {project_key}")
+
+        async def action(base_url, client):
+            fields = {
+                "project": {"key": project_key},
+                "summary": summary,
+                "issuetype": {"name": issue_type},
+            }
+            if description:
+                fields["description"] = adf(description)
+            response = await client.post("/issue", json={"fields": fields})
+            response.raise_for_status()
+            key = str(response.json().get("key") or "")
+            return {"issue_key": key, "url": f"{base_url}/browse/{key}",
+                    "message": f"Created {key}."}
+        return await self._run(call, action)
+
+    async def assign_issue(self, call):
+        issue_key = str(call.inputs["issue_key"]).strip()
+        account_id = str(call.inputs.get("account_id") or "").strip()
+        unassign = account_id.lower() in UNASSIGN
+        await call.progress(
+            f"Unassigning {issue_key}" if unassign else f"Assigning {issue_key}")
+
+        async def action(base_url, client):
+            response = await client.put(
+                f"/issue/{issue_key}/assignee",
+                json={"accountId": None if unassign else account_id})
+            response.raise_for_status()
+            return {"issue_key": issue_key, "message": (
+                f"Unassigned {issue_key}." if unassign
+                else f"Assigned {issue_key} to account {account_id}.")}
+        return await self._run(call, action)
+
+    async def add_comment(self, call):
+        issue_key = str(call.inputs["issue_key"]).strip()
+        comment = str(call.inputs["comment"]).strip()
+        if not comment:
+            return {"error": "The comment is empty."}, "error"
+        await call.progress(f"Commenting on {issue_key}")
+
+        async def action(base_url, client):
+            response = await client.post(
+                f"/issue/{issue_key}/comment", json={"body": adf(comment)})
+            response.raise_for_status()
+            return {
+                "issue_key": issue_key,
+                "comment_id": str(response.json().get("id") or ""),
+                "message": f"Comment added to {issue_key}.",
+            }
+        return await self._run(call, action)
