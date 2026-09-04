@@ -3,18 +3,21 @@ schema_version: "1.0"
 agent:
   id: github
   name: GitHub Agent
-  version: "1.0.0"
+  version: "1.1.0"
   description: >
-    Manages GitHub repositories, issues, and pull requests. Perfect for integrating
-    code workflows with task management.
+    Lists pull requests, reads their diffs and creates issues in GitHub
+    repositories. Pairs with the Jira agent to link engineering work back
+    to tasks.
   tags:
     - github
     - engineering
     - code
   instructions: >
-    Use the GitHub tools to interact with repositories, issues, and PRs.
-    This agent pairs well with the Jira agent to link engineering work (PRs/commits)
-    back to Jira tasks. Always read PR diffs to summarize them before asking for reviews.
+    Use the GitHub tools to work with repositories, issues and pull
+    requests. Repositories are named as owner and repo. Read a pull
+    request's diff before summarizing or reviewing it, and say so when
+    the diff was truncated. Confirm the repository and title before
+    creating an issue.
 
 implementation:
   entrypoint: agent:GitHubAgent
@@ -24,22 +27,27 @@ implementation:
 resources:
   secrets:
     - id: github_token
-      label: GitHub Personal Access Token
-      description: A GitHub Personal Access Token (classic or fine-grained) for API access.
+      label: GitHub Access Token
+      description: >
+        A personal access token (classic or fine-grained) with access to
+        the repositories. Leave the API base URL empty for github.com;
+        set it for GitHub Enterprise (https://ghe.example.com/api/v3).
       binding: {cardinality: one, required: true}
       fields:
         - {name: token, label: Access Token, type: secret, storage: values, required: true}
+        - {name: api_base_url, label: API Base URL, type: string, storage: keys, required: false}
 
 tools:
   - id: github
     name: GitHub Tool
-    description: Interacts with GitHub to manage issues and pull requests.
+    description: Reads pull requests and creates issues.
     resources:
       secrets: [github_token]
     functions:
+
       - id: list_prs
         name: List Pull Requests
-        description: List open pull requests for a repository.
+        description: List a repository's pull requests, most recently updated first.
         permission_level: 0
         timeout_seconds: 30
         resources:
@@ -51,8 +59,10 @@ tools:
           additionalProperties: false
           required: [owner, repo]
           properties:
-            owner: {type: string}
-            repo: {type: string}
+            owner: {type: string, minLength: 1}
+            repo: {type: string, minLength: 1}
+            state: {type: string, enum: [open, closed, all], default: open}
+            limit: {type: integer, minimum: 1, maximum: 100, default: 30}
         outputs:
           type: object
           required: [prs]
@@ -61,15 +71,20 @@ tools:
               type: array
               items:
                 type: object
+                required: [number, title, state, author]
                 properties:
                   number: {type: integer}
                   title: {type: string}
                   state: {type: string}
                   author: {type: string}
+                  draft: {type: boolean}
+                  url: {type: string}
 
       - id: get_pr_diff
         name: Get PR Diff
-        description: Get the diff of a pull request for summarization or review.
+        description: >
+          The diff of a pull request, for summarizing or reviewing. Long
+          diffs are cut at 20,000 characters and flagged as truncated.
         permission_level: 0
         timeout_seconds: 30
         resources:
@@ -81,18 +96,19 @@ tools:
           additionalProperties: false
           required: [owner, repo, pr_number]
           properties:
-            owner: {type: string}
-            repo: {type: string}
-            pr_number: {type: integer}
+            owner: {type: string, minLength: 1}
+            repo: {type: string, minLength: 1}
+            pr_number: {type: integer, minimum: 1}
         outputs:
           type: object
-          required: [diff_content]
+          required: [diff_content, truncated]
           properties:
             diff_content: {type: string}
+            truncated: {type: boolean}
 
       - id: create_issue
         name: Create GitHub Issue
-        description: Create an issue in a GitHub repository.
+        description: Create an issue in a repository.
         permission_level: 1
         timeout_seconds: 30
         resources:
@@ -102,15 +118,18 @@ tools:
         inputs:
           type: object
           additionalProperties: false
-          required: [owner, repo, title, body]
+          required: [owner, repo, title]
           properties:
-            owner: {type: string}
-            repo: {type: string}
-            title: {type: string}
+            owner: {type: string, minLength: 1}
+            repo: {type: string, minLength: 1}
+            title: {type: string, minLength: 1}
             body: {type: string}
+            labels:
+              type: array
+              items: {type: string}
         outputs:
           type: object
-          required: [success, issue_url]
+          required: [number, issue_url]
           properties:
-            success: {type: boolean}
+            number: {type: integer}
             issue_url: {type: string}
