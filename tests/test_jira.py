@@ -74,22 +74,60 @@ def test_a_failing_count_does_not_fail_the_search(jira, stub):
     assert [i["assignee"] for i in result["issues"]] == ["Unassigned", "Unassigned"]
 
 
-def test_execute_jql_returns_the_asked_fields_with_readable_descriptions(jira, stub):
+def test_execute_jql_returns_one_flat_readable_row_per_issue(jira, stub):
+    """Jira answers with objects for almost every field; a table wants
+    one cell per column. Each asked field becomes one readable value, in
+    the order asked, so nothing renders as [object Object]."""
     stub.on("GET", f"{API}/search/jql", {"issues": [{"key": "DEV-3", "fields": {
-        "summary": "Rotate keys", "priority": {"name": "High"},
+        "summary": "Rotate keys",
+        "priority": {"self": "https://x/priority/2", "id": "2", "name": "High"},
+        "status": {"name": "In Progress", "statusCategory": {"key": "indeterminate"}},
+        "assignee": {"accountId": "5b10", "displayName": "Ada", "active": True},
+        "issuetype": {"id": "10001", "name": "Task", "subtask": False},
+        "labels": ["security", "ops"],
+        "components": [{"id": "1", "name": "auth"}, {"id": "2", "name": "infra"}],
+        "customfield_10020": {"id": "3", "value": "Q4"},
+        "duedate": None,
         "description": {"type": "doc", "version": 1,
                         "content": [paragraph(text("Before Friday"))]},
+        "timespent": 3600,
     }}]})
+    fields = ["summary", "priority", "status", "assignee", "issuetype", "labels",
+              "components", "customfield_10020", "duedate", "description", "timespent"]
+
     result, status = jira("jira.execute_jql", {
-        "jql": "priority = High", "fields": ["summary", "priority", "description"],
-        "max_results": 5})
+        "jql": "priority = High", "fields": fields, "max_results": 5})
+
     assert status == "success", result
-    assert result["issues"] == [{"key": "DEV-3", "fields": {
-        "summary": "Rotate keys", "priority": {"name": "High"},
-        "description": "Before Friday"}}]
+    assert result["issues"] == [{
+        "key": "DEV-3",
+        "summary": "Rotate keys",
+        "priority": "High",
+        "status": "In Progress",
+        "assignee": "Ada",
+        "issuetype": "Task",
+        "labels": "security, ops",
+        "components": "auth, infra",
+        "customfield_10020": "Q4",
+        "duedate": "",
+        "description": "Before Friday",
+        "timespent": 3600,
+        "url": f"{stub.url}/browse/DEV-3",
+    }]
+    # Column order is the order asked, key first and the link last.
+    assert list(result["issues"][0]) == ["key", *fields, "url"]
     sent = stub.sent("GET", f"{API}/search/jql")[0]
     assert sent["query"] == {"jql": "priority = High", "maxResults": "5",
-                             "fields": "summary,priority,description"}
+                             "fields": ",".join(fields)}
+
+
+def test_execute_jql_defaults_to_summary_status_and_assignee(jira, stub):
+    stub.on("GET", f"{API}/search/jql", {"issues": [{"key": "DEV-4", "fields": {
+        "summary": "s", "status": {"name": "Done"}, "assignee": None}}]})
+    result, status = jira("jira.execute_jql", {"jql": "project = DEV"})
+    assert status == "success", result
+    assert result["issues"] == [{"key": "DEV-4", "summary": "s", "status": "Done",
+                                 "assignee": "", "url": f"{stub.url}/browse/DEV-4"}]
 
 
 def test_get_issue_flattens_the_adf_description(jira, stub):

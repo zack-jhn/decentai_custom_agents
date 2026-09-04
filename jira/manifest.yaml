@@ -3,7 +3,7 @@ schema_version: "1.0"
 agent:
   id: jira
   name: Jira Agent
-  version: "1.2.0"
+  version: "1.2.1"
   description: >
     Manages Jira Cloud issues: searches with JQL, reads issue details,
     creates issues, logs work, moves issues between statuses, assigns
@@ -86,9 +86,10 @@ tools:
       - id: execute_jql
         name: Execute Custom JQL
         description: >
-          Run any JQL query and return the requested fields of each
-          matching issue, as Jira names them (summary, status, assignee,
-          priority, labels, created, ...). Descriptions come back as text.
+          Run any JQL query and return one flat row per matching issue:
+          its key, then each requested field as readable text (summary,
+          status, assignee, priority, labels, created, description, ...),
+          then a link. Field names are Jira's own.
         permission_level: 0
         timeout_seconds: 45
         resources:
@@ -112,11 +113,13 @@ tools:
             issues:
               type: array
               items:
+                # key and url are always there; every other column is
+                # one of the requested fields, flattened to a cell value.
                 type: object
-                required: [key, fields]
+                required: [key, url]
                 properties:
                   key: {type: string}
-                  fields: {type: object}
+                  url: {type: string}
             total: {type: integer}
 
       - id: get_issue
