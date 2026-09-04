@@ -10,6 +10,8 @@ Stateless: a client is built per call from the bound connection and
 closed with it.
 """
 
+import json
+
 import httpx
 from decentai_sdk.base import ToolBase
 
@@ -93,6 +95,35 @@ def plain_text(node):
     if kind == "doc":
         return inner.strip()
     return inner + ("\n" if kind in BLOCK_NODES else "")
+
+
+def display(value):
+    """A Jira field value as something a table cell can show.
+
+    Jira answers with objects for almost everything — a status is
+    ``{"name": ...}``, a person ``{"displayName": ...}``, a select
+    option ``{"value": ...}``, a description an ADF document, labels a
+    list. A cell wants one string; this is the one place that decides
+    which part of each shape is the readable one."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return ", ".join(str(display(item)) for item in value
+                         if display(item) != "")
+    if isinstance(value, dict):
+        if value.get("type") == "doc":
+            return plain_text(value)
+        for name in ("displayName", "name", "value", "key", "emailAddress"):
+            if value.get(name):
+                return str(value[name])
+        return json.dumps(value, default=str)
+    return str(value)
 
 
 def error_message(response):
@@ -228,13 +259,15 @@ class JiraTool(ToolBase):
                 client, jql, max_results, ",".join(fields))
             rows = []
             for issue in issues:
-                found = dict(issue.get("fields") or {})
-                # The one rich-text field a query commonly asks for,
-                # readable rather than a document tree.
-                if "description" in found:
-                    found["description"] = plain_text(found["description"])
-                rows.append({"key": str(issue.get("key") or ""),
-                             "fields": found})
+                # One flat row per issue, one readable cell per asked
+                # field, in the order asked — what a table needs, and
+                # what the platform renders straight from storage.
+                found = issue.get("fields") or {}
+                row = {"key": str(issue.get("key") or "")}
+                for name in fields:
+                    row[name] = display(found.get(name))
+                row["url"] = f"{base_url}/browse/{issue.get('key')}"
+                rows.append(row)
             return {"issues": rows,
                     "total": await self._count(client, jql, len(rows))}
         return await self._run(call, action)

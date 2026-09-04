@@ -22,6 +22,10 @@ issues returned stands in when that is unavailable.
 People are assigned by account id. `search_users` finds it from a name
 or email; `assign_issue` with `none` unassigns.
 
+`execute_jql` returns one flat row per issue — key, then each requested
+field as a readable value, then a link — so the platform's tables show
+"In Progress" and "Ada" rather than the objects Jira answers with.
+
 ## Run the tests
 
 The agents run the way production runs them — in their own worker
